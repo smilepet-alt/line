@@ -35,7 +35,7 @@ def handle_message(event):
         response = model.generate_content(user_message)
         reply_text = response.text
     except Exception as e:
-        reply_text = "抱歉，AI 思考時發生了點問題。"
+        reply_text = f"發生錯誤了：{str(e)}"
 
     with ApiClient(configuration) as api_client:
         line_api = MessagingApi(api_client)
