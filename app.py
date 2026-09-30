@@ -6,19 +6,6 @@ import pytz
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v為了避免手動替換局部程式碼時容易出現縮排錯誤或漏掉 `import`，**最安全、最直接的做法就是「整份全部覆蓋」**！
-
-請將 GitHub 裡的 `app.py` 內容全部清空，直接貼上以下這份整合了 Google 日曆新增、推播功能、防呆正規表達式解析，以及當前可用模型 `gemini-3.6-flash` 的完整程式碼：
-
-```python
-import os
-import re
-import json
-from datetime import datetime
-import pytz
-from flask import Flask, request, abort
-from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi, 
     ReplyMessageRequest, PushMessageRequest, TextMessage
@@ -28,7 +15,6 @@ import google.generativeai as genai
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# 讀取雲端環境變數
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -40,22 +26,19 @@ app = Flask(__name__)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 設定 Gemini 模型
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-3.6-flash')
 
-# 建立 Google 日曆連線服務
 def get_calendar_service():
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         return None
     service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     credentials = service_account.Credentials.from_service_account_info(
         service_account_info,
-        scopes=['[https://www.googleapis.com/auth/calendar](https://www.googleapis.com/auth/calendar)']
+        scopes=['https://www.googleapis.com/auth/calendar']
     )
     return build('calendar', 'v3', credentials=credentials)
 
-# 寫入行程到 Google 日曆
 def add_calendar_event(summary, start_time_iso, end_time_iso):
     service = get_calendar_service()
     if not service or not GOOGLE_CALENDAR_ID:
@@ -69,7 +52,6 @@ def add_calendar_event(summary, start_time_iso, end_time_iso):
     created_event = service.events().insert(calendarId=GOOGLE_CALENDAR_ID, body=event).execute()
     return True, created_event.get('htmlLink')
 
-# LINE Webhook 入口
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -80,7 +62,6 @@ def callback():
         abort(400)
     return 'OK'
 
-# 處理收到的訊息
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_message = event.message.text
@@ -102,21 +83,23 @@ def handle_message(event):
         response = model.generate_content(prompt)
         res_text = response.text.strip()
 
-        # 使用正規表達式精準抓取 JSON 區塊
         json_match = re.search(r'\{.*"action":\s*"create_event".*\}', res_text, re.DOTALL)
         
         if json_match:
-            event_data = json.loads(json_match.group(0))
-            summary = event_data.get("summary")
-            start_iso = event_data.get("start")
-            end_iso = event_data.get("end")
-            
-            success, msg = add_calendar_event(summary, start_iso, end_iso)
-            if success:
-                clean_start = start_iso.replace("T", " ")[:16]
-                reply_text = f"✅ 已成功為您排入 Google 日曆！\n\n📌 活動：{summary}\n⏰ 時間：{clean_start}"
-            else:
-                reply_text = f"寫入日曆失敗，原因：{msg}"
+            try:
+                event_data = json.loads(json_match.group(0))
+                summary = event_data.get("summary")
+                start_iso = event_data.get("start")
+                end_iso = event_data.get("end")
+                
+                success, msg = add_calendar_event(summary, start_iso, end_iso)
+                if success:
+                    clean_start = start_iso.replace("T", " ")[:16]
+                    reply_text = f"✅ 已成功為您排入 Google 日曆！\n\n📌 活動：{summary}\n⏰ 時間：{clean_start}"
+                else:
+                    reply_text = f"寫入日曆失敗，原因：{msg}"
+            except Exception as parse_err:
+                reply_text = f"解析行程資料失敗：{str(parse_err)}"
         else:
             reply_text = res_text
 
@@ -132,7 +115,6 @@ def handle_message(event):
             )
         )
 
-# 主動推播提醒路由
 @app.route("/push-reminder", methods=['GET'])
 def push_reminder():
     if not MY_LINE_USER_ID:
