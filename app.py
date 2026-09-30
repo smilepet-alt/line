@@ -1,5 +1,4 @@
 import os
-import re
 import json
 from datetime import datetime
 import pytz
@@ -69,39 +68,50 @@ def handle_message(event):
     now_str = datetime.now(tz).strftime('%Y-%m-%d %H:%M (%A)')
 
     prompt = f"""
-你是一個智慧助理。當前台北時間是：{now_str}。
-使用者說：「{user_message}」
+當前台北時間是：{now_str}。
+使用者輸入：「{user_message}」
 
-請判斷這段話是否包含「新增行程、提醒或開會」的意圖：
-1. 如果是，請嚴格按照以下 JSON 格式回傳，不要加上任何 Markdown 標記或多餘文字：
-{{"action": "create_event", "summary": "事件名稱", "start": "YYYY-MM-DDTHH:MM:SS+08:00", "end": "YYYY-MM-DDTHH:MM:SS+08:00"}}
-（如果沒有說明持續時間，結束時間預設為開始時間加 1 小時）
+請分析使用者意圖，並嚴格只回傳 JSON 格式：
+1. 若含有新增行程、開會或提醒意圖：
+{{
+  "is_calendar_event": true,
+  "summary": "事件標題",
+  "start": "YYYY-MM-DDTHH:MM:SS+08:00",
+  "end": "YYYY-MM-DDTHH:MM:SS+08:00",
+  "chat_reply": ""
+}}
+（若未指定結束時間，預設為開始時間加 1 小時）
 
-2. 如果只是普通聊天或問題，請直接用親切自然的繁體中文回覆即可。
+2. 若為一般閒聊或問答：
+{{
+  "is_calendar_event": false,
+  "summary": "",
+  "start": "",
+  "end": "",
+  "chat_reply": "以親切自然繁體中文回覆使用者的內容"
+}}
 """
     try:
-        response = model.generate_content(prompt)
-        res_text = response.text.strip()
+        # 強制 Gemini 僅輸出合法 JSON
+        response = model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        res_data = json.loads(response.text.strip())
 
-        json_match = re.search(r'\{.*"action":\s*"create_event".*\}', res_text, re.DOTALL)
-        
-        if json_match:
-            try:
-                event_data = json.loads(json_match.group(0))
-                summary = event_data.get("summary")
-                start_iso = event_data.get("start")
-                end_iso = event_data.get("end")
-                
-                success, msg = add_calendar_event(summary, start_iso, end_iso)
-                if success:
-                    clean_start = start_iso.replace("T", " ")[:16]
-                    reply_text = f"✅ 已成功為您排入 Google 日曆！\n\n📌 活動：{summary}\n⏰ 時間：{clean_start}"
-                else:
-                    reply_text = f"寫入日曆失敗，原因：{msg}"
-            except Exception as parse_err:
-                reply_text = f"解析行程資料失敗：{str(parse_err)}"
+        if res_data.get("is_calendar_event"):
+            summary = res_data.get("summary")
+            start_iso = res_data.get("start")
+            end_iso = res_data.get("end")
+
+            success, msg = add_calendar_event(summary, start_iso, end_iso)
+            if success:
+                clean_start = start_iso.replace("T", " ")[:16]
+                reply_text = f"✅ 已成功為您排入 Google 日曆！\n\n📌 活動：{summary}\n⏰ 時間：{clean_start}"
+            else:
+                reply_text = f"寫入日曆失敗，原因：{msg}"
         else:
-            reply_text = res_text
+            reply_text = res_data.get("chat_reply", "收到！")
 
     except Exception as e:
         reply_text = f"處理時發生錯誤：{str(e)}"
