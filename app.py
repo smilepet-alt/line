@@ -26,30 +26,47 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-3.6-flash')
 
+# 建立 Google 日曆連線服務
 def get_calendar_service():
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         return None
     service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     credentials = service_account.Credentials.from_service_account_info(
         service_account_info,
-        scopes=['https://www.googleapis.com/auth/calendar']
+        scopes=['[https://www.googleapis.com/auth/calendar](https://www.googleapis.com/auth/calendar)']
     )
     return build('calendar', 'v3', credentials=credentials)
 
-def add_calendar_event(summary, start_time_iso, end_time_iso):
+# 定義給 Gemini 呼叫的日曆排程函式工具
+def add_calendar_event(summary: str, start_time: str, end_time: str):
+    """
+    新增行程到 Google 日曆。
+    Args:
+        summary: 活動或會議名稱 (例如: 開會)
+        start_time: 開始時間，格式為 YYYY-MM-DDTHH:MM:SS+08:00
+        end_time: 結束時間，格式為 YYYY-MM-DDTHH:MM:SS+08:00
+    """
     service = get_calendar_service()
     if not service or not GOOGLE_CALENDAR_ID:
         return False, "日曆環境變數未完整設定"
     
     event = {
         'summary': summary,
-        'start': {'dateTime': start_time_iso, 'timeZone': 'Asia/Taipei'},
-        'end': {'dateTime': end_time_iso, 'timeZone': 'Asia/Taipei'},
+        'start': {'dateTime': start_time, 'timeZone': 'Asia/Taipei'},
+        'end': {'dateTime': end_time, 'timeZone': 'Asia/Taipei'},
     }
-    created_event = service.events().insert(calendarId=GOOGLE_CALENDAR_ID, body=event).execute()
-    return True, created_event.get('htmlLink')
+    try:
+        created_event = service.events().insert(calendarId=GOOGLE_CALENDAR_ID, body=event).execute()
+        return True, created_event.get('htmlLink')
+    except Exception as e:
+        return False, str(e)
+
+# 初始化模型並綁定日曆工具
+model = genai.GenerativeModel(
+    model_name='gemini-3.6-flash',
+    tools=[add_calendar_event]
+)
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -69,49 +86,39 @@ def handle_message(event):
 
     prompt = f"""
 當前台北時間是：{now_str}。
-使用者輸入：「{user_message}」
+使用者說：「{user_message}」
 
-請分析使用者意圖，並嚴格只回傳 JSON 格式：
-1. 若含有新增行程、開會或提醒意圖：
-{{
-  "is_calendar_event": true,
-  "summary": "事件標題",
-  "start": "YYYY-MM-DDTHH:MM:SS+08:00",
-  "end": "YYYY-MM-DDTHH:MM:SS+08:00",
-  "chat_reply": ""
-}}
-（若未指定結束時間，預設為開始時間加 1 小時）
-
-2. 若為一般閒聊或問答：
-{{
-  "is_calendar_event": false,
-  "summary": "",
-  "start": "",
-  "end": "",
-  "chat_reply": "以親切自然繁體中文回覆使用者的內容"
-}}
+如果使用者想要預約行程、設定開會或提醒，請直接呼叫 add_calendar_event 函式。
+結束時間若未特別說明，請預設為開始時間加 1 小時。
+若為一般問答或閒聊，請直接用親切自然的繁體中文回覆。
 """
     try:
-        # 強制 Gemini 僅輸出合法 JSON
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        res_data = json.loads(response.text.strip())
+        chat = model.start_chat(enable_automatic_function_calling=False)
+        response = chat.send_message(prompt)
 
-        if res_data.get("is_calendar_event"):
-            summary = res_data.get("summary")
-            start_iso = res_data.get("start")
-            end_iso = res_data.get("end")
+        # 檢查模型是否觸發了日曆排程函式
+        function_called = False
+        reply_text = ""
+        
+        for part in response.parts:
+            fn = getattr(part, 'function_call', None)
+            if fn and fn.name == 'add_calendar_event':
+                function_called = True
+                args = fn.args
+                summary = args.get('summary', '行程')
+                start_time = args.get('start_time', '')
+                end_time = args.get('end_time', '')
+                
+                success, msg = add_calendar_event(summary, start_time, end_time)
+                if success:
+                    clean_start = str(start_time).replace("T", " ")[:16]
+                    reply_text = f"✅ 已成功為您排入 Google 日曆！\n\n📌 活動：{summary}\n⏰ 時間：{clean_start}"
+                else:
+                    reply_text = f"寫入日曆失敗，原因：{msg}"
+                break
 
-            success, msg = add_calendar_event(summary, start_iso, end_iso)
-            if success:
-                clean_start = start_iso.replace("T", " ")[:16]
-                reply_text = f"✅ 已成功為您排入 Google 日曆！\n\n📌 活動：{summary}\n⏰ 時間：{clean_start}"
-            else:
-                reply_text = f"寫入日曆失敗，原因：{msg}"
-        else:
-            reply_text = res_data.get("chat_reply", "收到！")
+        if not function_called:
+            reply_text = response.text if response.text else "收到！"
 
     except Exception as e:
         reply_text = f"處理時發生錯誤：{str(e)}"
