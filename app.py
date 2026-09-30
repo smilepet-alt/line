@@ -82,21 +82,34 @@ def handle_message(event):
         response = model.generate_content(prompt)
         res_text = response.text.strip()
 
+        # 自動去除 AI 可能包覆的 markdown 標籤（如 ```json ... ```）
+        clean_text = res_text
+        if clean_text.startswith("```"):
+            lines = clean_text.splitlines()
+            if len(lines) >= 2:
+                clean_text = "\n".join(lines[1:-1]).strip()
+
         # 判斷是否為預約行程的 JSON
-        if res_text.startswith("{") and res_text.endswith("}"):
-            event_data = json.loads(res_text)
-            if event_data.get("action") == "create_event":
-                summary = event_data.get("summary")
-                start_iso = event_data.get("start")
-                end_iso = event_data.get("end")
-                success, msg = add_calendar_event(summary, start_iso, end_iso)
-                if success:
-                    # 格式化顯示時間
-                    clean_start = start_iso.replace("T", " ")[:16]
-                    reply_text = f"✅ 已成功為您排入 Google 日曆！\n\n📌 活動：{summary}\n⏰ 時間：{clean_start}"
+        if "{" in clean_text and "}" in clean_text:
+            start_idx = clean_text.find("{")
+            end_idx = clean_text.rfind("}") + 1
+            json_str = clean_text[start_idx:end_idx]
+            
+            try:
+                event_data = json.loads(json_str)
+                if event_data.get("action") == "create_event":
+                    summary = event_data.get("summary")
+                    start_iso = event_data.get("start")
+                    end_iso = event_data.get("end")
+                    success, msg = add_calendar_event(summary, start_iso, end_iso)
+                    if success:
+                        clean_start = start_iso.replace("T", " ")[:16]
+                        reply_text = f"✅ 已成功為您排入 Google 日曆！\n\n📌 活動：{summary}\n⏰ 時間：{clean_start}"
+                    else:
+                        reply_text = f"寫入日曆失敗，原因：{msg}"
                 else:
-                    reply_text = f"寫入日曆失敗，原因：{msg}"
-            else:
+                    reply_text = res_text
+            except json.JSONDecodeError:
                 reply_text = res_text
         else:
             reply_text = res_text
